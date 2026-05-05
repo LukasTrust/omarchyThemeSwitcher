@@ -1,41 +1,54 @@
 #!/usr/bin/env bash
 # omarchy-theme-switcherd — daemon tick script
-# Called by systemd timer (minutely) or directly with --random-login
+# Called by systemd timer or directly with --random-login
+set -euo pipefail
+IFS=$'\n\t'
 
 LIB_DIR="${LIB_DIR:-/usr/lib/omarchy-theme-switcher}"
 
 source "$LIB_DIR/config.sh"
+source "$LIB_DIR/theme.sh"
+source "$LIB_DIR/geo.sh"
 source "$LIB_DIR/schedule.sh"
 
 config_init
-
-_notify() {
-    local theme="$1"
-    local enabled
-    enabled=$(config_get "NOTIFY" "false")
-    if [[ "$enabled" == "true" ]] && command -v notify-send &>/dev/null; then
-        notify-send --app-name="Theme Switcher" "Theme changed" "Now using: $theme" 2>/dev/null || true
-    fi
-}
 
 RANDOM_LOGIN=false
 for arg in "$@"; do
     [[ "$arg" == "--random-login" ]] && RANDOM_LOGIN=true
 done
 
+# ---------------------------------------------------------------------------
+# Check for manual override: if the user has changed the theme since our last
+# auto-switch and OVERRIDE_BEHAVIOR=respect, skip this transition.
+# Call as: _override_active && return
+# ---------------------------------------------------------------------------
+_override_active() {
+    [[ "$(config_get OVERRIDE_BEHAVIOR respect)" != "respect" ]] && return 1
+    local current last_auto
+    current=$(omarchy-theme-current 2>/dev/null || echo "")
+    last_auto=$(config_get "LAST_AUTO_THEME" "")
+    [[ -n "$last_auto" && -n "$current" && "$current" != "$last_auto" ]]
+}
+
 do_random_login() {
     local theme
-    theme=$(random_theme)
-    if [[ -z "$theme" ]]; then
-        log_entry "random-login: no themes in pool"
-        exit 0
-    fi
-    log_entry "random-login: applying $theme"
-    omarchy-theme-set "$theme"
-    _notify "$theme"
+    theme=$(random_theme) || { log_entry "random-login: no themes in pool"; exit 0; }
+    apply_theme "$theme" "random-login" --auto
 }
 
 do_day_night() {
+    local period last_period
+    period=$(current_period)
+    last_period=$(config_get "DAEMON_ACTIVE_PERIOD" "")
+    [[ "$period" == "$last_period" ]] && return
+
+    if _override_active; then
+        log_entry "day-night: respecting manual override; skipping transition to $period"
+        config_set "DAEMON_ACTIVE_PERIOD" "$period"
+        return
+    fi
+
     local required
     required=$(required_theme_for_period)
     if [[ -z "$required" ]]; then
@@ -44,14 +57,94 @@ do_day_night() {
     fi
 
     local current
-    current=$(omarchy-theme-current 2>/dev/null)
-    if [[ "$current" == "$required" ]]; then
-        return  # already correct, no action needed
+    current=$(omarchy-theme-current 2>/dev/null || echo "unknown")
+    log_entry "day-night: period=$period, was=$current"
+    apply_theme "$required" "day-night" --auto
+    config_set "DAEMON_ACTIVE_PERIOD" "$period"
+}
+
+do_night_only() {
+    local night_theme
+    night_theme=$(config_get "NIGHT_THEME")
+    if [[ -z "$night_theme" ]]; then
+        log_entry "night-only: NIGHT_THEME not configured, skipping"
+        return
     fi
 
-    log_entry "day-night: switching to $required (was $current)"
-    omarchy-theme-set "$required"
-    _notify "$required"
+    local period last_period
+    period=$(current_period)
+    last_period=$(config_get "DAEMON_ACTIVE_PERIOD" "")
+    [[ "$period" == "$last_period" ]] && return
+
+    local current
+    current=$(omarchy-theme-current 2>/dev/null || echo "unknown")
+
+    if [[ "$period" == "night" ]]; then
+        if _override_active; then
+            log_entry "night-only: respecting manual override; skipping night transition"
+            config_set "DAEMON_ACTIVE_PERIOD" "night"
+            return
+        fi
+        config_set "SAVED_THEME" "$current"
+        apply_theme "$night_theme" "night-only" --auto
+        config_set "DAEMON_ACTIVE_PERIOD" "night"
+    else
+        local saved
+        saved=$(config_get "SAVED_THEME" "")
+        if [[ -n "$saved" ]]; then
+            if _override_active; then
+                log_entry "night-only: respecting manual override; skipping revert"
+                config_set "SAVED_THEME" ""
+                config_set "DAEMON_ACTIVE_PERIOD" "day"
+                return
+            fi
+            apply_theme "$saved" "night-only-revert" --auto
+            config_set "SAVED_THEME" ""
+        fi
+        config_set "DAEMON_ACTIVE_PERIOD" "day"
+    fi
+}
+
+do_day_only() {
+    local day_theme
+    day_theme=$(config_get "DAY_THEME")
+    if [[ -z "$day_theme" ]]; then
+        log_entry "day-only: DAY_THEME not configured, skipping"
+        return
+    fi
+
+    local period last_period
+    period=$(current_period)
+    last_period=$(config_get "DAEMON_ACTIVE_PERIOD" "")
+    [[ "$period" == "$last_period" ]] && return
+
+    local current
+    current=$(omarchy-theme-current 2>/dev/null || echo "unknown")
+
+    if [[ "$period" == "day" ]]; then
+        if _override_active; then
+            log_entry "day-only: respecting manual override; skipping day transition"
+            config_set "DAEMON_ACTIVE_PERIOD" "day"
+            return
+        fi
+        config_set "SAVED_THEME" "$current"
+        apply_theme "$day_theme" "day-only" --auto
+        config_set "DAEMON_ACTIVE_PERIOD" "day"
+    else
+        local saved
+        saved=$(config_get "SAVED_THEME" "")
+        if [[ -n "$saved" ]]; then
+            if _override_active; then
+                log_entry "day-only: respecting manual override; skipping revert"
+                config_set "SAVED_THEME" ""
+                config_set "DAEMON_ACTIVE_PERIOD" "night"
+                return
+            fi
+            apply_theme "$saved" "day-only-revert" --auto
+            config_set "SAVED_THEME" ""
+        fi
+        config_set "DAEMON_ACTIVE_PERIOD" "night"
+    fi
 }
 
 do_rotation() {
@@ -60,15 +153,18 @@ do_rotation() {
     fi
 
     local theme
-    theme=$(next_rotation_theme)
-    if [[ -z "$theme" ]]; then
-        log_entry "rotation: no themes in pool"
+    theme=$(next_rotation_theme) || { log_entry "rotation: no themes in pool"; return; }
+
+    if _override_active; then
+        log_entry "rotation: respecting manual override ($theme skipped); advancing state"
+        local current
+        current=$(omarchy-theme-current 2>/dev/null || echo "")
+        config_set "ROTATION_LAST_SWITCH" "$(date '+%Y-%m-%d')"
+        config_set "ROTATION_LAST_THEME" "${current:-$theme}"
         return
     fi
 
-    log_entry "rotation: switching to $theme"
-    omarchy-theme-set "$theme"
-    _notify "$theme"
+    apply_theme "$theme" "rotation" --auto
     config_set "ROTATION_LAST_SWITCH" "$(date '+%Y-%m-%d')"
     config_set "ROTATION_LAST_THEME" "$theme"
 }
@@ -79,23 +175,36 @@ main() {
         exit 0
     fi
 
+    # Check pause state
+    local paused_until; paused_until=$(config_get "PAUSED_UNTIL" "")
+    if [[ -n "$paused_until" ]]; then
+        local now; now=$(date '+%s')
+        if [[ "$paused_until" == "indefinite" ]] || (( now < paused_until )); then
+            local rem=""
+            [[ "$paused_until" != "indefinite" ]] && rem=" ($(( (paused_until - now) / 60 ))m remaining)"
+            log_entry "daemon: paused${rem}, skipping tick"
+            schedule_arm_next
+            exit 0
+        else
+            # Pause expired — clear it
+            config_set "PAUSED_UNTIL" ""
+        fi
+    fi
+
     local mode
     mode=$(config_get "MODE" "off")
 
     case "$mode" in
-        day-night)
-            do_day_night
-            ;;
-        rotation)
-            do_rotation
-            ;;
-        off | random-login)
-            # Nothing to do on a timer tick for these modes
-            ;;
-        *)
-            log_entry "unknown mode: $mode"
-            ;;
+        day-night)   do_day_night ;;
+        night-only)  do_night_only ;;
+        day-only)    do_day_only ;;
+        rotation)    do_rotation ;;
+        off|random-login) ;;
+        *) log_entry "unknown mode: $mode" ;;
     esac
+
+    # Arm next wakeup after every tick
+    schedule_arm_next
 }
 
 main "$@"

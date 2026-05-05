@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # omarchy-theme-switcher — main entrypoint (TUI + CLI)
+set -euo pipefail
+IFS=$'\n\t'
 
 LIB_DIR="${LIB_DIR:-/usr/lib/omarchy-theme-switcher}"
 
 source "$LIB_DIR/config.sh"
+source "$LIB_DIR/theme.sh"
+source "$LIB_DIR/geo.sh"
 source "$LIB_DIR/schedule.sh"
 source "$LIB_DIR/tui.sh"
 
@@ -14,44 +18,72 @@ usage() {
 Usage: omarchy-theme-switcher [OPTIONS]
 
 Options:
-  --status          Show current configuration and next scheduled event
-  --list            List all available themes
-  --apply THEME     Apply a specific theme immediately
-  --random          Apply a random theme from the configured pool
-  --set-mode MODE   Set mode without TUI (off|day-night|rotation|random-login)
-  --force-check     Run daemon logic once immediately
-  --purge           Remove all config and state files (use before uninstalling)
-  --help            Show this help
+  --status [--json]     Show current configuration and next scheduled event
+  --list                List all available themes
+  --apply THEME         Apply a specific theme immediately
+  --apply-day           Apply the configured day theme immediately
+  --apply-night         Apply the configured night theme immediately
+  --cycle               Apply the next theme in the rotation pool
+  --random              Apply a random theme from the configured pool
+  --set-mode MODE       Set mode without TUI (off|day-night|night-only|day-only|rotation|random-login)
+  --pause [DURATION]    Pause automation (DURATION: 1h, 4h, 30m, until-resume; default: until-resume)
+  --resume              Resume automation
+  --force-check         Run daemon logic once immediately
+  --doctor              Check system health and configuration
+  --purge               Remove all config and state files (use before uninstalling)
+  --help                Show this help
 
 Without options, launches the interactive TUI.
 EOF
 }
 
 cmd_status() {
-    local mode current next
+    local json=false
+    [[ "${1:-}" == "--json" ]] && json=true
+
+    local mode current next paused_until
     mode=$(config_get "MODE" "off")
     current=$(omarchy-theme-current 2>/dev/null || echo "unknown")
     next=$(next_switch_description)
-    echo "Current theme : $current"
-    echo "Mode          : $mode"
-    echo "Next event    : $next"
-    echo "Config file   : $SWITCHER_CONF"
-    echo "Log file      : $SWITCHER_LOG"
+    paused_until=$(config_get "PAUSED_UNTIL" "")
+
+    if $json; then
+        local paused_str="false"
+        local now; now=$(date '+%s')
+        if [[ "$paused_until" == "indefinite" ]] || \
+           { [[ -n "$paused_until" ]] && (( now < paused_until )); }; then
+            paused_str="true"
+        fi
+        cat <<EOF
+{
+  "current_theme": "$current",
+  "mode": "$mode",
+  "next_event": "$next",
+  "paused": $paused_str,
+  "paused_until": "${paused_until:-null}",
+  "config_file": "$SWITCHER_CONF",
+  "log_file": "$SWITCHER_LOG"
+}
+EOF
+    else
+        echo "Current theme : $current"
+        echo "Mode          : $mode"
+        echo "Next event    : $next"
+        [[ -n "$paused_until" ]] && echo "Paused until  : $paused_until"
+        echo "Config file   : $SWITCHER_CONF"
+        echo "Log file      : $SWITCHER_LOG"
+    fi
 }
 
 cmd_set_mode() {
     local mode="$1"
-    case "$mode" in
-        off | day-night | rotation | random-login)
-            config_set "MODE" "$mode"
-            echo "Mode set to: $mode"
-            ;;
-        *)
-            echo "Unknown mode: $mode" >&2
-            echo "Valid modes: off, day-night, rotation, random-login" >&2
-            exit 1
-            ;;
-    esac
+    if ! validate_mode "$mode"; then
+        echo "Unknown mode: $mode" >&2
+        echo "Valid modes: off, day-night, night-only, day-only, rotation, random-login" >&2
+        exit 1
+    fi
+    config_set "MODE" "$mode"
+    echo "Mode set to: $mode"
 }
 
 cmd_force_check() {
@@ -68,21 +100,71 @@ cmd_apply() {
         echo "Missing theme name" >&2
         exit 1
     fi
-    omarchy-theme-set "$theme"
-    log_entry "manual: applied $theme"
+    apply_theme "$theme" "manual"
     echo "Applied theme: $theme"
 }
 
-cmd_random() {
-    local theme
-    theme=$(random_theme)
+cmd_apply_day() {
+    local theme; theme=$(config_get "DAY_THEME")
     if [[ -z "$theme" ]]; then
-        echo "No themes in pool" >&2
+        echo "DAY_THEME is not configured" >&2
         exit 1
     fi
-    omarchy-theme-set "$theme"
-    log_entry "manual-random: applied $theme"
+    apply_theme "$theme" "manual-day"
+    echo "Applied day theme: $theme"
+}
+
+cmd_apply_night() {
+    local theme; theme=$(config_get "NIGHT_THEME")
+    if [[ -z "$theme" ]]; then
+        echo "NIGHT_THEME is not configured" >&2
+        exit 1
+    fi
+    apply_theme "$theme" "manual-night"
+    echo "Applied night theme: $theme"
+}
+
+cmd_cycle() {
+    local theme; theme=$(next_rotation_theme) || { echo "No themes in rotation pool" >&2; exit 1; }
+    apply_theme "$theme" "manual-cycle"
+    config_set "ROTATION_LAST_THEME" "$theme"
+    echo "Cycled to theme: $theme"
+}
+
+cmd_random() {
+    local theme; theme=$(random_theme) || { echo "No themes in pool" >&2; exit 1; }
+    apply_theme "$theme" "manual-random"
     echo "Applied theme: $theme"
+}
+
+# Parse DURATION string: "1h", "30m", "4h", "until-resume" → epoch or "indefinite"
+_parse_duration() {
+    local dur="${1:-until-resume}"
+    case "$dur" in
+        until-resume) echo "indefinite" ;;
+        *h) echo $(( $(date '+%s') + ${dur%h} * 3600 )) ;;
+        *m) echo $(( $(date '+%s') + ${dur%m} * 60 )) ;;
+        *)  echo "indefinite" ;;
+    esac
+}
+
+cmd_pause() {
+    local until; until=$(_parse_duration "${1:-}")
+    config_set "PAUSED_UNTIL" "$until"
+    if [[ "$until" == "indefinite" ]]; then
+        echo "Automation paused indefinitely. Use --resume to re-enable."
+    else
+        local rem=$(( until - $(date '+%s') ))
+        printf 'Automation paused for %dm.\n' $(( rem / 60 ))
+    fi
+    # Re-arm so the timer fires at resume time
+    schedule_arm_next
+}
+
+cmd_resume() {
+    config_set "PAUSED_UNTIL" ""
+    echo "Automation resumed."
+    schedule_arm_next
 }
 
 cmd_purge() {
@@ -92,29 +174,82 @@ cmd_purge() {
     [[ "$quiet" != "--quiet" ]] && echo "Done."
 }
 
+cmd_doctor() {
+    local fail=false
+
+    _chk() {
+        local label="$1" ok="$2" msg="${3:-}"
+        if [[ "$ok" == "0" ]]; then
+            printf 'OK   %s\n' "$label"
+        elif [[ "$ok" == "warn" ]]; then
+            printf 'WARN %s%s\n' "$label" "${msg:+  ($msg)}"
+        else
+            printf 'FAIL %s%s\n' "$label" "${msg:+  ($msg)}"
+            fail=true
+        fi
+    }
+
+    echo "=== omarchy-theme-switcher doctor ==="
+    echo ""
+
+    for cmd in omarchy-theme-set omarchy-theme-list omarchy-theme-current gum; do
+        command -v "$cmd" &>/dev/null && _chk "$cmd present" 0 || _chk "$cmd present" 1 "not found in PATH"
+    done
+
+    local mode; mode=$(config_get "MODE" "off")
+    _chk "Config file readable" 0
+
+    if [[ "$mode" != "off" && "$mode" != "random-login" ]]; then
+        if systemctl --user is-active omarchy-theme-switcher.timer &>/dev/null; then
+            _chk "systemd timer active" 0
+        else
+            _chk "systemd timer active" "warn" "timer not running — run: systemctl --user enable --now omarchy-theme-switcher.timer"
+        fi
+        local next_epoch
+        next_epoch=$(compute_next_event_epoch 2>/dev/null || echo "")
+        if [[ -n "$next_epoch" ]]; then
+            local next_fmt; next_fmt=$(date -d "@$next_epoch" '+%Y-%m-%d %H:%M' 2>/dev/null || \
+                                       date -r "$next_epoch" '+%Y-%m-%d %H:%M')
+            _chk "Next event scheduled" 0
+            printf '     Next: %s\n' "$next_fmt"
+        else
+            _chk "Next event scheduled" "warn" "could not compute next event"
+        fi
+    fi
+
+    if [[ "$mode" == "random-login" ]]; then
+        local hook="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/hooks/login"
+        if [[ -f "$hook" ]] && grep -q "omarchy-theme-switcher" "$hook" && [[ -x "$hook" ]]; then
+            _chk "Login hook installed" 0
+        else
+            _chk "Login hook installed" 1 "missing or not executable — reconfigure random-login mode"
+        fi
+    fi
+
+    echo ""
+    echo "=== Last 5 log entries ==="
+    if [[ -f "$SWITCHER_LOG" ]] && [[ -s "$SWITCHER_LOG" ]]; then
+        tail -5 "$SWITCHER_LOG"
+    else
+        echo "(no entries)"
+    fi
+
+    $fail && exit 1 || exit 0
+}
+
 tui_loop() {
     while true; do
         local choice
-        choice=$(tui_main_menu)
+        choice=$(tui_main_menu) || break
         case "$choice" in
-            "Browse & Apply Theme")
-                tui_browse_themes
-                ;;
-            "Configure Mode")
-                tui_configure_mode
-                ;;
-            "View Current Settings")
-                tui_view_settings
-                ;;
-            "View Switch Log")
-                tui_view_log
-                ;;
-            "Notifications: On" | "Notifications: Off")
-                tui_toggle_notifications
-                ;;
-            "Exit" | "")
-                break
-                ;;
+            "Browse & Apply Theme")  tui_browse_themes ;;
+            "Configure Mode")        tui_configure_mode ;;
+            "View Current Settings") tui_view_settings ;;
+            "View Switch Log")       tui_view_log ;;
+            "Notifications: On" | "Notifications: Off") tui_toggle_notifications ;;
+            "Pause automation…")     tui_pause_automation ;;
+            "Resume automation")     tui_resume_automation ;;
+            "Exit" | "")            break ;;
         esac
     done
 }
@@ -127,7 +262,7 @@ main() {
 
     case "$1" in
         --status)
-            cmd_status
+            cmd_status "${2:-}"
             ;;
         --list)
             cmd_list
@@ -136,6 +271,15 @@ main() {
             [[ -z "${2:-}" ]] && { echo "Missing theme argument" >&2; exit 1; }
             cmd_apply "$2"
             ;;
+        --apply-day)
+            cmd_apply_day
+            ;;
+        --apply-night)
+            cmd_apply_night
+            ;;
+        --cycle)
+            cmd_cycle
+            ;;
         --random)
             cmd_random
             ;;
@@ -143,8 +287,17 @@ main() {
             [[ -z "${2:-}" ]] && { echo "Missing mode argument" >&2; exit 1; }
             cmd_set_mode "$2"
             ;;
+        --pause)
+            cmd_pause "${2:-}"
+            ;;
+        --resume)
+            cmd_resume
+            ;;
         --force-check)
             cmd_force_check
+            ;;
+        --doctor)
+            cmd_doctor
             ;;
         --purge)
             cmd_purge "${2:-}"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scheduling logic: day-night crossover and rotation interval checks
+# Scheduling logic: day-night crossover, rotation interval checks, next-event arm
 
 # Convert HH:MM to minutes-since-midnight
 time_to_minutes() {
@@ -10,11 +10,28 @@ time_to_minutes() {
     echo $(( 10#$h * 60 + 10#$m ))
 }
 
+# Effective day/night start times — from geo cache if SCHEDULE_TYPE=geo, else config
+_effective_times() {
+    local day_start night_start
+    if [[ "$(config_get SCHEDULE_TYPE clock)" == "geo" ]] && \
+       command -v geo_sun_times &>/dev/null; then
+        local lat lon twilight
+        lat=$(config_get "LATITUDE" "")
+        lon=$(config_get "LONGITUDE" "")
+        twilight=$(config_get "TWILIGHT" "civil")
+        if [[ -n "$lat" && -n "$lon" ]]; then
+            read -r day_start night_start < <(geo_sun_times "$lat" "$lon" "$twilight" 2>/dev/null || echo "")
+        fi
+    fi
+    day_start="${day_start:-$(config_get DAY_START '07:00')}"
+    night_start="${night_start:-$(config_get NIGHT_START '20:00')}"
+    echo "$day_start" "$night_start"
+}
+
 # Returns "day" or "night" based on current time and configured boundaries
 current_period() {
     local day_start night_start
-    day_start=$(config_get "DAY_START" "07:00")
-    night_start=$(config_get "NIGHT_START" "20:00")
+    read -r day_start night_start < <(_effective_times)
 
     local now_min day_min night_min
     now_min=$(time_to_minutes "$(date '+%H:%M')")
@@ -37,7 +54,7 @@ current_period() {
     fi
 }
 
-# Returns "day" or "night" for the theme that should currently be active
+# Returns the configured theme for the current period
 required_theme_for_period() {
     local period
     period=$(current_period)
@@ -55,7 +72,7 @@ rotation_due() {
     last_switch=$(config_get "ROTATION_LAST_SWITCH" "")
 
     if [[ -z "$last_switch" ]]; then
-        return 0  # never switched
+        return 0
     fi
 
     local today
@@ -110,35 +127,119 @@ next_rotation_theme() {
         fi
     done
 
-    # Last theme not in pool — start from beginning
     echo "${pool[0]}"
 }
 
-# Pick a random theme from the random-login pool
-random_theme() {
-    local pool
-    mapfile -t pool < <(random_login_pool)
-    if [[ ${#pool[@]} -eq 0 ]]; then
-        echo ""
-        return 1
+# ---------------------------------------------------------------------------
+# Event-driven scheduling: compute when the next event should fire (epoch),
+# then arm a transient systemd user timer to call the daemon at that time.
+# ---------------------------------------------------------------------------
+
+# Return the Unix epoch at which the next scheduled event should fire.
+# Outputs nothing and returns 1 if no event is needed (off, random-login, paused).
+compute_next_event_epoch() {
+    local mode
+    mode=$(config_get "MODE" "off")
+
+    local paused_until; paused_until=$(config_get "PAUSED_UNTIL" "")
+    if [[ -n "$paused_until" ]]; then
+        if [[ "$paused_until" == "indefinite" ]]; then
+            return 1
+        fi
+        local now; now=$(date '+%s')
+        if (( now < paused_until )); then
+            echo "$paused_until"
+            return 0
+        fi
     fi
-    local idx=$(( RANDOM % ${#pool[@]} ))
-    echo "${pool[$idx]}"
+
+    local now; now=$(date '+%s')
+
+    case "$mode" in
+        day-night|night-only|day-only)
+            local day_start night_start
+            read -r day_start night_start < <(_effective_times)
+            local day_min night_min now_min
+            now_min=$(time_to_minutes "$(date '+%H:%M')")
+            day_min=$(time_to_minutes "$day_start")
+            night_min=$(time_to_minutes "$night_start")
+
+            # Compute minutes until each boundary
+            local mins_to_day mins_to_night
+            mins_to_day=$(( day_min - now_min ))
+            (( mins_to_day <= 0 )) && mins_to_day=$(( mins_to_day + 1440 ))
+            mins_to_night=$(( night_min - now_min ))
+            (( mins_to_night <= 0 )) && mins_to_night=$(( mins_to_night + 1440 ))
+
+            local next_mins
+            next_mins=$(( mins_to_day < mins_to_night ? mins_to_day : mins_to_night ))
+            echo $(( now + next_mins * 60 ))
+            ;;
+        rotation)
+            # Fire at midnight local time (start of next potential rotation day)
+            local midnight
+            midnight=$(date -d 'tomorrow 00:01' '+%s' 2>/dev/null || \
+                       date -v+1d -v0H -v1M -v0S '+%s')
+            echo "$midnight"
+            ;;
+        off|random-login)
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
-# Human-readable description of when the next event occurs
+# Arm a transient systemd user timer to call the daemon at the next event.
+# Safe to call multiple times — replaces any pre-existing next-event unit.
+schedule_arm_next() {
+    local epoch
+    epoch=$(compute_next_event_epoch) || return 0
+
+    # systemd-run with --on-calendar=@EPOCH schedules a one-shot transient unit.
+    # We stop any previous instance first to avoid accumulation.
+    systemctl --user stop omarchy-theme-switcher-next.timer 2>/dev/null || true
+
+    systemd-run --user \
+        --unit=omarchy-theme-switcher-next \
+        --on-calendar="@${epoch}" \
+        --timer-property=AccuracySec=10s \
+        /usr/bin/omarchy-theme-switcherd 2>/dev/null || \
+        log_entry "schedule_arm_next: systemd-run failed, falling back to static timer"
+}
+
+# ---------------------------------------------------------------------------
+# Human-readable next-event description
+# ---------------------------------------------------------------------------
+
 next_switch_description() {
     local mode
     mode=$(config_get "MODE" "off")
+
+    local paused_until; paused_until=$(config_get "PAUSED_UNTIL" "")
+    if [[ -n "$paused_until" ]]; then
+        if [[ "$paused_until" == "indefinite" ]]; then
+            echo "Paused (indefinite)"
+            return
+        fi
+        local now; now=$(date '+%s')
+        if (( now < paused_until )); then
+            local rem=$(( paused_until - now ))
+            printf 'Paused — %dm remaining' $(( rem / 60 ))
+            return
+        fi
+    fi
+
+    local day_start night_start
+    read -r day_start night_start < <(_effective_times)
+
     case "$mode" in
         off)
             echo "Automation is off"
             ;;
         day-night)
-            local period day_start night_start
-            period=$(current_period)
-            day_start=$(config_get "DAY_START" "07:00")
-            night_start=$(config_get "NIGHT_START" "20:00")
+            local period; period=$(current_period)
             if [[ "$period" == "day" ]]; then
                 echo "Night theme activates at $night_start"
             else
@@ -153,6 +254,22 @@ next_switch_description() {
             ;;
         random-login)
             echo "Random theme applied on each login"
+            ;;
+        night-only)
+            local period; period=$(current_period)
+            if [[ "$period" == "night" ]]; then
+                echo "Reverts to saved theme at $day_start"
+            else
+                echo "Night theme activates at $night_start"
+            fi
+            ;;
+        day-only)
+            local period; period=$(current_period)
+            if [[ "$period" == "day" ]]; then
+                echo "Reverts to saved theme at $night_start"
+            else
+                echo "Day theme activates at $day_start"
+            fi
             ;;
     esac
 }

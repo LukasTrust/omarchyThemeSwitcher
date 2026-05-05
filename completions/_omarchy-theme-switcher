@@ -1,0 +1,33 @@
+#compdef omarchy-theme-switcher
+# zsh completion for omarchy-theme-switcher
+
+_omarchy_theme_switcher() {
+    local state
+
+    _arguments \
+        '--status[Show current configuration]:json flag:->status_flag' \
+        '--list[List all available themes]' \
+        '--apply[Apply a specific theme]:theme:->themes' \
+        '--apply-day[Apply the configured day theme]' \
+        '--apply-night[Apply the configured night theme]' \
+        '--cycle[Apply the next theme in the rotation pool]' \
+        '--random[Apply a random theme]' \
+        '--set-mode[Set automation mode]:mode:(off day-night night-only day-only rotation random-login)' \
+        '--pause[Pause automation]:duration:(1h 4h 8h 30m until-resume)' \
+        '--resume[Resume automation]' \
+        '--force-check[Run daemon logic immediately]' \
+        '--doctor[Check system health]' \
+        '--purge[Remove all config and state]' \
+        '--help[Show help]' && return
+
+    case "$state" in
+        themes)
+            local themes
+            themes=( ${(f)"$(omarchy-theme-list 2>/dev/null)"} )
+            _describe 'theme' themes ;;
+        status_flag)
+            _values 'flag' '--json' ;;
+    esac
+}
+
+_omarchy_theme_switcher "$@"

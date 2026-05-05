@@ -1,30 +1,104 @@
 post_install() {
-    echo ""
-    echo "  omarchy-theme-switcher installed!"
-    echo ""
-    echo "  To get started, run:"
-    echo "    systemctl --user daemon-reload"
-    echo "    omarchy-theme-switcher"
-    echo ""
+    if command -v gum &>/dev/null; then
+        gum style \
+            --border rounded \
+            --border-foreground 212 \
+            --padding "0 2" \
+            --margin "1 0" \
+            --bold \
+            "  Omarchy Theme Switcher — installed!"
+        gum style \
+            --padding "0 2" \
+            "To get started, run:" \
+            "" \
+            "  systemctl --user daemon-reload" \
+            "  omarchy-theme-switcher"
+    else
+        echo ""
+        echo "  omarchy-theme-switcher installed!"
+        echo ""
+        echo "  To get started, run:"
+        echo "    systemctl --user daemon-reload"
+        echo "    omarchy-theme-switcher"
+        echo ""
+    fi
+
+    local real_user="${SUDO_USER:-}"
+    [[ -z "$real_user" ]] && real_user=$(logname 2>/dev/null) || true
+
+    if [[ -n "$real_user" ]] && command -v omarchy-tui-install &>/dev/null; then
+        echo ""
+        if gum confirm "Add Omarchy Theme Switcher to the omarchy app launcher?"; then
+            runuser -u "$real_user" -- omarchy-tui-install \
+                "Omarchy Theme Switcher" \
+                "omarchy-theme-switcher" \
+                "float" \
+                "/usr/share/pixmaps/omarchy-theme-switcher.svg"
+        fi
+    fi
 }
 
 post_upgrade() {
-    echo ""
-    echo "  omarchy-theme-switcher upgraded."
-    echo "  Reloading systemd user daemon…"
     systemctl --user daemon-reload 2>/dev/null || true
-    echo ""
+    if command -v gum &>/dev/null; then
+        gum style \
+            --border rounded \
+            --border-foreground 212 \
+            --padding "0 2" \
+            --margin "1 0" \
+            --bold \
+            "  Omarchy Theme Switcher — upgraded!"
+        gum style \
+            --padding "0 2" \
+            "Systemd user daemon reloaded."
+    else
+        echo ""
+        echo "  omarchy-theme-switcher upgraded."
+        echo "  Systemd user daemon reloaded."
+        echo ""
+    fi
 }
 
 pre_remove() {
     systemctl --user disable --now omarchy-theme-switcher.timer 2>/dev/null || true
     systemctl --user disable --now omarchy-theme-switcher.service 2>/dev/null || true
+
+    local real_user="${SUDO_USER:-}"
+    if [[ -z "$real_user" ]]; then
+        real_user=$(logname 2>/dev/null) || true
+    fi
+
+    if [[ -n "$real_user" ]]; then
+        local home
+        home=$(getent passwd "$real_user" | cut -d: -f6)
+        local desktop="$home/.local/share/applications/Omarchy Theme Switcher.desktop"
+        if [[ -f "$desktop" ]] && command -v omarchy-tui-remove &>/dev/null; then
+            runuser -u "$real_user" -- omarchy-tui-remove "Omarchy Theme Switcher" 2>/dev/null || true
+        fi
+
+        if command -v omarchy-theme-switcher &>/dev/null; then
+            runuser -u "$real_user" -- omarchy-theme-switcher --purge --quiet 2>/dev/null || true
+        fi
+    fi
 }
 
 post_remove() {
     systemctl --user daemon-reload 2>/dev/null || true
-    echo ""
-    echo "  omarchy-theme-switcher removed."
-    echo "  Your config at ~/.config/omarchy/theme-switcher.conf was preserved."
-    echo ""
+    if command -v gum &>/dev/null; then
+        gum style \
+            --border rounded \
+            --border-foreground 212 \
+            --padding "0 2" \
+            --margin "1 0" \
+            --bold \
+            "  Omarchy Theme Switcher — removed."
+        gum style \
+            --padding "0 2" \
+            "Config and state files have been cleaned up."
+    else
+        echo ""
+        echo "  omarchy-theme-switcher removed."
+        echo "  Config and state files have been cleaned up."
+        echo ""
+    fi
 }

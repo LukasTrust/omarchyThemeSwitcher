@@ -6,18 +6,61 @@ SWITCHER_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/theme-switcher.conf"
 SWITCHER_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/theme"
 SWITCHER_LOG="$SWITCHER_STATE_DIR/switcher.log"
 
+CONFIG_SCHEMA_VERSION=2
+
 config_defaults() {
-    echo "MODE=off"
-    echo "DAY_THEME="
-    echo "NIGHT_THEME="
-    echo "DAY_START=07:00"
-    echo "NIGHT_START=20:00"
-    echo "ROTATION_INTERVAL=daily"
-    echo "ROTATION_THEMES="
-    echo "ROTATION_LAST_SWITCH="
-    echo "ROTATION_LAST_THEME="
-    echo "RANDOM_LOGIN_THEMES="
-    echo "NOTIFY=false"
+    cat <<'EOF'
+CONFIG_VERSION=2
+MODE=off
+DAY_THEME=
+NIGHT_THEME=
+DAY_START=07:00
+NIGHT_START=20:00
+ROTATION_INTERVAL=daily
+ROTATION_THEMES=
+ROTATION_LAST_SWITCH=
+ROTATION_LAST_THEME=
+RANDOM_LOGIN_THEMES=
+SAVED_THEME=
+DAEMON_ACTIVE_PERIOD=
+NOTIFY=false
+PAUSED_UNTIL=
+LAST_AUTO_THEME=
+SCHEDULE_TYPE=clock
+LATITUDE=
+LONGITUDE=
+TWILIGHT=civil
+OVERRIDE_BEHAVIOR=respect
+NEXT_EVENT_AT=
+WIZARD_SHOWN=false
+EOF
+}
+
+# Upgrade an existing config file to the current schema version by appending
+# any missing keys with their default values, then stamping CONFIG_VERSION.
+_config_upgrade() {
+    local defaults_map
+    declare -A defaults_map
+
+    while IFS='=' read -r key val; do
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        defaults_map["$key"]="$val"
+    done < <(config_defaults)
+
+    local changed=false
+    for key in "${!defaults_map[@]}"; do
+        if ! grep -q "^${key}=" "$SWITCHER_CONF" 2>/dev/null; then
+            echo "${key}=${defaults_map[$key]}" >> "$SWITCHER_CONF"
+            changed=true
+        fi
+    done
+
+    # Stamp or update the schema version
+    if grep -q "^CONFIG_VERSION=" "$SWITCHER_CONF" 2>/dev/null; then
+        config_set "CONFIG_VERSION" "$CONFIG_SCHEMA_VERSION"
+    else
+        echo "CONFIG_VERSION=$CONFIG_SCHEMA_VERSION" >> "$SWITCHER_CONF"
+    fi
 }
 
 config_init() {
@@ -25,6 +68,13 @@ config_init() {
     mkdir -p "$SWITCHER_STATE_DIR"
     if [[ ! -f "$SWITCHER_CONF" ]]; then
         config_defaults > "$SWITCHER_CONF"
+        return
+    fi
+
+    local version
+    version=$(grep -m1 "^CONFIG_VERSION=" "$SWITCHER_CONF" 2>/dev/null | cut -d= -f2-)
+    if [[ -z "$version" || "$version" -lt "$CONFIG_SCHEMA_VERSION" ]]; then
+        _config_upgrade
     fi
 }
 
@@ -36,21 +86,20 @@ config_get() {
     echo "${val:-$default}"
 }
 
+# Atomic config_set: write via tmp+mv so partial writes never corrupt the file.
+# Uses awk so values containing |, &, \, or = are handled safely.
 config_set() {
     local key="$1"
     local value="$2"
     config_init
+    local tmp="${SWITCHER_CONF}.tmp"
     if grep -q "^${key}=" "$SWITCHER_CONF" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=${value}|" "$SWITCHER_CONF"
+        awk -v k="$key" -v v="$value" \
+            '$0 ~ "^"k"="{print k"="v; next} {print}' \
+            "$SWITCHER_CONF" > "$tmp" && mv "$tmp" "$SWITCHER_CONF"
     else
         echo "${key}=${value}" >> "$SWITCHER_CONF"
     fi
-}
-
-config_load() {
-    config_init
-    # shellcheck source=/dev/null
-    source "$SWITCHER_CONF"
 }
 
 log_entry() {
@@ -79,7 +128,7 @@ config_purge() {
     rm -rf "$SWITCHER_STATE_DIR"
 }
 
-# Return sorted array of theme names from ROTATION_THEMES or all installed themes
+# Return sorted list of themes from ROTATION_THEMES or all installed themes
 theme_pool() {
     local pool
     pool=$(config_get "ROTATION_THEMES")
@@ -98,4 +147,29 @@ random_login_pool() {
     else
         tr ',' '\n' <<< "$pool" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sort
     fi
+}
+
+# ---------------------------------------------------------------------------
+# Validators
+# ---------------------------------------------------------------------------
+
+# Returns 0 if the string is a valid HH:MM time (00:00–23:59)
+validate_hhmm() {
+    local t="$1"
+    [[ "$t" =~ ^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$ ]]
+}
+
+# Returns 0 if lat/lon are plausible floating-point values in range
+validate_latlon() {
+    local lat="$1" lon="$2"
+    [[ "$lat" =~ ^-?([0-8]?[0-9](\.[0-9]+)?|90(\.0+)?)$ ]] || return 1
+    [[ "$lon" =~ ^-?(1?[0-7]?[0-9](\.[0-9]+)?|180(\.0+)?)$ ]] || return 1
+}
+
+# Returns 0 if the mode string is valid
+validate_mode() {
+    case "$1" in
+        off|day-night|night-only|day-only|rotation|random-login) return 0 ;;
+        *) return 1 ;;
+    esac
 }
