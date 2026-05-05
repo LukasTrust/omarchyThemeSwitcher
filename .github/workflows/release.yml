@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release tarball
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PKGNAME="omarchy-theme-switcher"
+          ARCHIVE="${PKGNAME}-${VERSION}.tar.gz"
+          # Create tarball matching what PKGBUILD expects: $pkgname-$pkgver/
+          git archive --prefix="${PKGNAME}-${VERSION}/" HEAD | gzip > "$ARCHIVE"
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+          echo "SHA256=$(sha256sum "$ARCHIVE" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "v${{ steps.version.outputs.version }}"
+          body: |
+            ## omarchy-theme-switcher v${{ steps.version.outputs.version }}
+
+            **SHA256:** `${{ env.SHA256 }}`
+
+            ### Install via AUR helper
+            ```bash
+            yay -S omarchy-theme-switcher
+            paru -S omarchy-theme-switcher
+            ```
+
+            ### Manual install
+            ```bash
+            curl -L ${{ github.server_url }}/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.tar.gz \
+              -o omarchy-theme-switcher-${{ steps.version.outputs.version }}.tar.gz
+            # Update PKGBUILD sha256sums with: ${{ env.SHA256 }}
+            makepkg -si
+            ```
+          files: ${{ env.ARCHIVE }}
+          fail_on_unmatched_files: true

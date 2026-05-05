@@ -16,9 +16,6 @@ install="$pkgname.install"
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
-# For local development/testing: override source with local files
-# source=("$pkgname::git+file:///path/to/omarchyThemeSwitcher")
-
 prepare() {
     # Nothing to prepare for a shell-only package
     true
@@ -38,8 +35,6 @@ package() {
     # Executables
     install -Dm755 "$src/src/omarchy-theme-switcher" \
         "$pkgdir/usr/bin/omarchy-theme-switcher"
-    install -Dm755 "$src/src/omarchy-theme-switcherd" \
-        "$pkgdir/usr/bin/omarchy-theme-switcherd"
 
     # Library files
     install -Dm644 "$src/lib/config.sh" \
