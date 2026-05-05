@@ -1,0 +1,14 @@
+[Unit]
+Description=Omarchy Theme Switcher — daemon tick
+Documentation=https://github.com/lukas/omarchyThemeSwitcher
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/omarchy-theme-switcherd
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+
+[Install]
+WantedBy=default.target

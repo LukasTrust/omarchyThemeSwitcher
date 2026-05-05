@@ -1,0 +1,30 @@
+post_install() {
+    echo ""
+    echo "  omarchy-theme-switcher installed!"
+    echo ""
+    echo "  To get started, run:"
+    echo "    systemctl --user daemon-reload"
+    echo "    omarchy-theme-switcher"
+    echo ""
+}
+
+post_upgrade() {
+    echo ""
+    echo "  omarchy-theme-switcher upgraded."
+    echo "  Reloading systemd user daemon…"
+    systemctl --user daemon-reload 2>/dev/null || true
+    echo ""
+}
+
+pre_remove() {
+    systemctl --user disable --now omarchy-theme-switcher.timer 2>/dev/null || true
+    systemctl --user disable --now omarchy-theme-switcher.service 2>/dev/null || true
+}
+
+post_remove() {
+    systemctl --user daemon-reload 2>/dev/null || true
+    echo ""
+    echo "  omarchy-theme-switcher removed."
+    echo "  Your config at ~/.config/omarchy/theme-switcher.conf was preserved."
+    echo ""
+}

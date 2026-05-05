@@ -1,0 +1,12 @@
+[Unit]
+Description=Omarchy Theme Switcher — minutely tick
+Documentation=https://github.com/lukas/omarchyThemeSwitcher
+After=graphical-session.target
+
+[Timer]
+OnCalendar=minutely
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

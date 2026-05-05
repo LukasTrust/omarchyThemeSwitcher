@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# omarchy-theme-switcher — main entrypoint (TUI + CLI)
+
+LIB_DIR="${LIB_DIR:-/usr/lib/omarchy-theme-switcher}"
+
+source "$LIB_DIR/config.sh"
+source "$LIB_DIR/schedule.sh"
+source "$LIB_DIR/tui.sh"
+
+config_init
+
+usage() {
+    cat <<EOF
+Usage: omarchy-theme-switcher [OPTIONS]
+
+Options:
+  --status          Show current configuration and next scheduled event
+  --list            List all available themes
+  --apply THEME     Apply a specific theme immediately
+  --random          Apply a random theme from the configured pool
+  --set-mode MODE   Set mode without TUI (off|day-night|rotation|random-login)
+  --force-check     Run daemon logic once immediately
+  --purge           Remove all config and state files (use before uninstalling)
+  --help            Show this help
+
+Without options, launches the interactive TUI.
+EOF
+}
+
+cmd_status() {
+    local mode current next
+    mode=$(config_get "MODE" "off")
+    current=$(omarchy-theme-current 2>/dev/null || echo "unknown")
+    next=$(next_switch_description)
+    echo "Current theme : $current"
+    echo "Mode          : $mode"
+    echo "Next event    : $next"
+    echo "Config file   : $SWITCHER_CONF"
+    echo "Log file      : $SWITCHER_LOG"
+}
+
+cmd_set_mode() {
+    local mode="$1"
+    case "$mode" in
+        off | day-night | rotation | random-login)
+            config_set "MODE" "$mode"
+            echo "Mode set to: $mode"
+            ;;
+        *)
+            echo "Unknown mode: $mode" >&2
+            echo "Valid modes: off, day-night, rotation, random-login" >&2
+            exit 1
+            ;;
+    esac
+}
+
+cmd_force_check() {
+    exec omarchy-theme-switcherd
+}
+
+cmd_list() {
+    omarchy-theme-list
+}
+
+cmd_apply() {
+    local theme="$1"
+    if [[ -z "$theme" ]]; then
+        echo "Missing theme name" >&2
+        exit 1
+    fi
+    omarchy-theme-set "$theme"
+    log_entry "manual: applied $theme"
+    echo "Applied theme: $theme"
+}
+
+cmd_random() {
+    local theme
+    theme=$(random_theme)
+    if [[ -z "$theme" ]]; then
+        echo "No themes in pool" >&2
+        exit 1
+    fi
+    omarchy-theme-set "$theme"
+    log_entry "manual-random: applied $theme"
+    echo "Applied theme: $theme"
+}
+
+cmd_purge() {
+    local quiet="${1:-}"
+    [[ "$quiet" != "--quiet" ]] && echo "Removing omarchy-theme-switcher config and state…"
+    config_purge
+    [[ "$quiet" != "--quiet" ]] && echo "Done."
+}
+
+tui_loop() {
+    while true; do
+        local choice
+        choice=$(tui_main_menu)
+        case "$choice" in
+            "Browse & Apply Theme")
+                tui_browse_themes
+                ;;
+            "Configure Mode")
+                tui_configure_mode
+                ;;
+            "View Current Settings")
+                tui_view_settings
+                ;;
+            "View Switch Log")
+                tui_view_log
+                ;;
+            "Notifications: On" | "Notifications: Off")
+                tui_toggle_notifications
+                ;;
+            "Exit" | "")
+                break
+                ;;
+        esac
+    done
+}
+
+main() {
+    if [[ $# -eq 0 ]]; then
+        tui_loop
+        exit 0
+    fi
+
+    case "$1" in
+        --status)
+            cmd_status
+            ;;
+        --list)
+            cmd_list
+            ;;
+        --apply)
+            [[ -z "${2:-}" ]] && { echo "Missing theme argument" >&2; exit 1; }
+            cmd_apply "$2"
+            ;;
+        --random)
+            cmd_random
+            ;;
+        --set-mode)
+            [[ -z "${2:-}" ]] && { echo "Missing mode argument" >&2; exit 1; }
+            cmd_set_mode "$2"
+            ;;
+        --force-check)
+            cmd_force_check
+            ;;
+        --purge)
+            cmd_purge "${2:-}"
+            ;;
+        --help | -h)
+            usage
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

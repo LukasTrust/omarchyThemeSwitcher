@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# omarchy-theme-switcherd — daemon tick script
+# Called by systemd timer (minutely) or directly with --random-login
+
+LIB_DIR="${LIB_DIR:-/usr/lib/omarchy-theme-switcher}"
+
+source "$LIB_DIR/config.sh"
+source "$LIB_DIR/schedule.sh"
+
+config_init
+
+_notify() {
+    local theme="$1"
+    local enabled
+    enabled=$(config_get "NOTIFY" "false")
+    if [[ "$enabled" == "true" ]] && command -v notify-send &>/dev/null; then
+        notify-send --app-name="Theme Switcher" "Theme changed" "Now using: $theme" 2>/dev/null || true
+    fi
+}
+
+RANDOM_LOGIN=false
+for arg in "$@"; do
+    [[ "$arg" == "--random-login" ]] && RANDOM_LOGIN=true
+done
+
+do_random_login() {
+    local theme
+    theme=$(random_theme)
+    if [[ -z "$theme" ]]; then
+        log_entry "random-login: no themes in pool"
+        exit 0
+    fi
+    log_entry "random-login: applying $theme"
+    omarchy-theme-set "$theme"
+    _notify "$theme"
+}
+
+do_day_night() {
+    local required
+    required=$(required_theme_for_period)
+    if [[ -z "$required" ]]; then
+        log_entry "day-night: theme not configured for current period, skipping"
+        return
+    fi
+
+    local current
+    current=$(omarchy-theme-current 2>/dev/null)
+    if [[ "$current" == "$required" ]]; then
+        return  # already correct, no action needed
+    fi
+
+    log_entry "day-night: switching to $required (was $current)"
+    omarchy-theme-set "$required"
+    _notify "$required"
+}
+
+do_rotation() {
+    if ! rotation_due; then
+        return
+    fi
+
+    local theme
+    theme=$(next_rotation_theme)
+    if [[ -z "$theme" ]]; then
+        log_entry "rotation: no themes in pool"
+        return
+    fi
+
+    log_entry "rotation: switching to $theme"
+    omarchy-theme-set "$theme"
+    _notify "$theme"
+    config_set "ROTATION_LAST_SWITCH" "$(date '+%Y-%m-%d')"
+    config_set "ROTATION_LAST_THEME" "$theme"
+}
+
+main() {
+    if $RANDOM_LOGIN; then
+        do_random_login
+        exit 0
+    fi
+
+    local mode
+    mode=$(config_get "MODE" "off")
+
+    case "$mode" in
+        day-night)
+            do_day_night
+            ;;
+        rotation)
+            do_rotation
+            ;;
+        off | random-login)
+            # Nothing to do on a timer tick for these modes
+            ;;
+        *)
+            log_entry "unknown mode: $mode"
+            ;;
+    esac
+}
+
+main "$@"
