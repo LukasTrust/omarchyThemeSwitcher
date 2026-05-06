@@ -9,7 +9,16 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests
+        run: bash tests/run_tests.sh
+
   release:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

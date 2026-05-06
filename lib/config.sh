@@ -63,19 +63,27 @@ _config_upgrade() {
     fi
 }
 
+_CONFIG_INIT_RUNNING=false
+
 config_init() {
+    # Guard against re-entrant calls (config_set → config_init during upgrade)
+    if $_CONFIG_INIT_RUNNING; then return; fi
+    _CONFIG_INIT_RUNNING=true
+
     mkdir -p "$(dirname "$SWITCHER_CONF")"
     mkdir -p "$SWITCHER_STATE_DIR"
     if [[ ! -f "$SWITCHER_CONF" ]]; then
         config_defaults > "$SWITCHER_CONF"
+        _CONFIG_INIT_RUNNING=false
         return
     fi
 
     local version
-    version=$(grep -m1 "^CONFIG_VERSION=" "$SWITCHER_CONF" 2>/dev/null | cut -d= -f2-)
+    version=$(grep -m1 "^CONFIG_VERSION=" "$SWITCHER_CONF" 2>/dev/null | cut -d= -f2-) || true
     if [[ -z "$version" || "$version" -lt "$CONFIG_SCHEMA_VERSION" ]]; then
         _config_upgrade
     fi
+    _CONFIG_INIT_RUNNING=false
 }
 
 config_get() {

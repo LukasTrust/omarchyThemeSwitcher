@@ -52,6 +52,9 @@ _geo_via_awk() {
     esac
 
     awk -v lat="$lat" -v lon="$lon" -v zenith="$zen" '
+    function asin(x) { return atan2(x, sqrt(1 - x*x)) }
+    function acos(x) { return atan2(sqrt(1 - x*x), x) }
+    function tan(x)  { return sin(x) / cos(x) }
     BEGIN {
         PI = 3.14159265358979
         DEG = PI / 180

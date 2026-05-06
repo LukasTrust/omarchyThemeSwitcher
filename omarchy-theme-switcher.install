@@ -1,4 +1,29 @@
+# Reload the systemd user daemon for every currently logged-in user.
+# pacman hooks run as root, so plain "systemctl --user" would target root's
+# session (which doesn't exist). We iterate real users via loginctl instead.
+_reload_user_daemons() {
+    while read -r uid user _; do
+        [[ -z "$uid" || -z "$user" ]] && continue
+        XDG_RUNTIME_DIR="/run/user/$uid" \
+            runuser -u "$user" -- \
+            systemctl --user daemon-reload 2>/dev/null || true
+    done < <(loginctl list-users --no-legend 2>/dev/null)
+}
+
+# Disable/stop a systemd user unit for every logged-in user.
+_disable_user_unit() {
+    local unit="$1"
+    while read -r uid user _; do
+        [[ -z "$uid" || -z "$user" ]] && continue
+        XDG_RUNTIME_DIR="/run/user/$uid" \
+            runuser -u "$user" -- \
+            systemctl --user disable --now "$unit" 2>/dev/null || true
+    done < <(loginctl list-users --no-legend 2>/dev/null)
+}
+
 post_install() {
+    _reload_user_daemons
+
     if command -v gum &>/dev/null; then
         gum style \
             --border rounded \
@@ -9,17 +34,11 @@ post_install() {
             "  Omarchy Theme Switcher — installed!"
         gum style \
             --padding "0 2" \
-            "To get started, run:" \
-            "" \
-            "  systemctl --user daemon-reload" \
-            "  omarchy-theme-switcher"
+            "Run omarchy-theme-switcher to get started."
     else
         echo ""
         echo "  omarchy-theme-switcher installed!"
-        echo ""
-        echo "  To get started, run:"
-        echo "    systemctl --user daemon-reload"
-        echo "    omarchy-theme-switcher"
+        echo "  Run: omarchy-theme-switcher"
         echo ""
     fi
 
@@ -39,7 +58,7 @@ post_install() {
 }
 
 post_upgrade() {
-    systemctl --user daemon-reload 2>/dev/null || true
+    _reload_user_daemons
     if command -v gum &>/dev/null; then
         gum style \
             --border rounded \
@@ -60,8 +79,8 @@ post_upgrade() {
 }
 
 pre_remove() {
-    systemctl --user disable --now omarchy-theme-switcher.timer 2>/dev/null || true
-    systemctl --user disable --now omarchy-theme-switcher.service 2>/dev/null || true
+    _disable_user_unit "omarchy-theme-switcher.timer"
+    _disable_user_unit "omarchy-theme-switcher.service"
 
     local real_user="${SUDO_USER:-}"
     if [[ -z "$real_user" ]]; then
@@ -83,7 +102,7 @@ pre_remove() {
 }
 
 post_remove() {
-    systemctl --user daemon-reload 2>/dev/null || true
+    _reload_user_daemons
     if command -v gum &>/dev/null; then
         gum style \
             --border rounded \

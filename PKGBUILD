@@ -6,7 +6,7 @@ pkgdesc="TUI and scheduler for Omarchy theme switching (day/night, rotation, ran
 arch=('any')
 url="https://github.com/LukasTrust/omarchyThemeSwitcher"
 license=('MIT')
-depends=('bash' 'gum' 'omarchy')
+depends=('bash' 'gum')
 optdepends=(
     'systemd: for automated timer-based switching'
     'sunwait: accurate geolocation-based sunrise/sunset times'
@@ -16,9 +16,11 @@ install="$pkgname.install"
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
-prepare() {
-    # Nothing to prepare for a shell-only package
-    true
+check() {
+    local src="${srcdir}/${pkgname}-${pkgver}"
+    [[ ! -d "$src" ]] && src="${srcdir}/${pkgname}"
+    [[ ! -d "$src" ]] && src="${srcdir}"
+    bash "$src/tests/run_tests.sh"
 }
 
 package() {
@@ -33,8 +35,10 @@ package() {
     fi
 
     # Executables
-    install -Dm755 "$src/src/omarchy-theme-switcher" \
+    install -Dm755 "$src/bin/omarchy-theme-switcher" \
         "$pkgdir/usr/bin/omarchy-theme-switcher"
+    install -Dm755 "$src/bin/omarchy-theme-switcherd" \
+        "$pkgdir/usr/bin/omarchy-theme-switcherd"
 
     # Library files
     install -Dm644 "$src/lib/config.sh" \
