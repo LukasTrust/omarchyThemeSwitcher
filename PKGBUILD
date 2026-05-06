@@ -1,6 +1,6 @@
 # Maintainer: Lukas <dingenses2@gmail.com>
 pkgname=omarchy-theme-switcher
-pkgver=1.0.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc="TUI and scheduler for Omarchy theme switching (day/night, rotation, random-login)"
 arch=('any')
